@@ -57,12 +57,39 @@ def generate_meshing_scripts_auto(project_root, journal_template,
             template
         )
 
-        # 2️⃣ Replace Export Fluent 2D Mesh path (handles None or existing path)
-        journal_content = re.sub(
-            r"(workflow\.TaskObject\['Export Fluent 2D Mesh'\]\.Arguments\.set_state\()([^)]+)\)",
-            fr"\1{{r'FileName': r'{mesh_path}'}})",
-            journal_content
-        )
+        # 2️⃣ Add mesh export command if not present
+        if "Export Fluent" not in journal_content and "file/write-mesh" not in journal_content:
+            # Determine workflow type and add appropriate export command
+            if "2D Meshing" in journal_content:
+                # For 2D workflows, use the workflow task
+                export_command = f"""
+(%py-exec "workflow.TaskObject['Export Fluent 2D Mesh'].Arguments.set_state({{r'FileName': r'{mesh_path}'}})")
+(%py-exec "workflow.TaskObject['Export Fluent 2D Mesh'].Execute()")
+/exit y
+"""
+            else:
+                # For 3D workflows, use the direct Fluent command
+                export_command = f"""
+/file/write-mesh {mesh_path}
+/exit y
+"""
+            journal_content += export_command
+        else:
+            # Replace existing mesh export path
+            if "Export Fluent" in journal_content:
+                # Replace workflow task export
+                journal_content = re.sub(
+                    r"(workflow\.TaskObject\['Export Fluent [23]D Mesh'\]\.Arguments\.set_state\()([^)]+)\)",
+                    fr"\1{{r'FileName': r'{mesh_path}'}})",
+                    journal_content
+                )
+            else:
+                # Replace direct file command
+                journal_content = re.sub(
+                    r"(/file/write-mesh\s+)[^\s\n]+",
+                    fr"\1{mesh_path}",
+                    journal_content
+                )
 
         # Save per-geometry journal
         journal_name = geom_file.rsplit(".", 1)[0] + "_mesh.jou"

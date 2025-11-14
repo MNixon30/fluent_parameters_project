@@ -5,10 +5,12 @@ import sys
 
 def run_meshing_scripts(project_root, fluent_path, meshing_cores):
     """
-    Runs all Fluent 2D meshing journal scripts stored in <project_root>\test_files\scripts automatically.
+    Runs all Fluent 2D/3D meshing journal scripts stored in <project_root>\test_files\scripts automatically.
     
     Parameters:
         project_root (str): Root folder of the project.
+        fluent_path (str): Path to the Fluent executable.
+        meshing_cores (int): Number of cores for meshing.
     """
     script_folder = os.path.join(project_root, "test_files", "scripts")
 
@@ -74,10 +76,54 @@ def generate_master_fluent_script(input_file_path: str, project_folder_path: str
     
     # --- Locate all mesh files ---
     mesh_folder = os.path.join(project_folder_path, "test_files", "msh")
-    mesh_files = [f for f in os.listdir(mesh_folder) if f.lower().endswith((".msh", ".msh.h5"))]
+    all_mesh_files = [f for f in os.listdir(mesh_folder) if f.lower().endswith((".msh", ".msh.h5"))]
+    
+    if not all_mesh_files:
+        raise FileNotFoundError(f"No mesh files found in {mesh_folder}")
+    
+    # Read the updated DesignPoints.csv to get only successful design points
+    design_points_file = os.path.join(project_folder_path, "test_files", "dps", "DesignPoints.csv")
+    successful_design_points = []
+    
+    if os.path.exists(design_points_file):
+        try:
+            import csv
+            with open(design_points_file, 'r') as f:
+                reader = csv.reader(f)
+                header = next(reader)  # Skip header
+                row_index = 0  # Design point index starts from 0
+                for row in reader:
+                    if row:  # Skip empty rows
+                        successful_design_points.append(row_index)  # Use row index as design point index
+                        row_index += 1
+            print(f"📊 Found {len(successful_design_points)} successful design points: {successful_design_points}")
+        except Exception as e:
+            print(f"⚠️ Error reading DesignPoints.csv: {e}")
+            # Fall back to processing all mesh files
+            successful_design_points = None
+    else:
+        print("⚠️ DesignPoints.csv not found, will process all mesh files")
+        successful_design_points = None
+    
+    # Filter mesh files to only include successful design points
+    if successful_design_points is not None:
+        mesh_files = []
+        for dp_idx in successful_design_points:
+            # Look for mesh file corresponding to this design point
+            # Files are named like Geom_dp0.msh.h5, Geom_dp1.msh.h5, etc.
+            expected_filename = f"Geom_dp{dp_idx}.msh.h5"
+            if expected_filename in all_mesh_files:
+                mesh_files.append(expected_filename)
+            else:
+                print(f"⚠️ Mesh file not found for design point {dp_idx}: {expected_filename}")
+        print(f"📁 Processing {len(mesh_files)} mesh files for successful design points: {mesh_files}")
+    else:
+        # Fall back to processing all mesh files
+        mesh_files = all_mesh_files
+        print(f"📁 Processing all {len(mesh_files)} mesh files: {mesh_files}")
     
     if not mesh_files:
-        raise FileNotFoundError(f"No mesh files found in {mesh_folder}")
+        raise FileNotFoundError(f"No mesh files found for successful design points in {mesh_folder}")
 
     # --- Read template script ---
     with open(input_file_path, "r") as f:
@@ -98,9 +144,20 @@ def generate_master_fluent_script(input_file_path: str, project_folder_path: str
     remaining_lines = lines[end_idx+1:]
 
     # --- Replace any hardcoded mesh read path in the template ---
+    # Also remove solver.exit() calls and print_all_to_console() calls since we handle those separately
     mesh_read_pattern = re.compile(r"solver\.settings\.file\.read_mesh\(file_name\s*=\s*r?['\"].*?['\"]\)")
+    solver_exit_pattern = re.compile(r"solver\.exit\s*\(\s*\)")
+    print_output_pattern = re.compile(r"solver\.settings\.parameters\.output_parameters\.print_all_to_console\s*\(\s*\)")
     processed_lines = []
     for line in remaining_lines:
+        # Skip solver.exit() calls - we'll add one at the end after the loop
+        if solver_exit_pattern.search(line):
+            print(f"🗑️ Removing solver.exit() call from template: {line.strip()}")
+            continue
+        # Skip print_all_to_console() calls - we'll save to file instead
+        if print_output_pattern.search(line):
+            print(f"🗑️ Removing print_all_to_console() call from template (will save to file instead): {line.strip()}")
+            continue
         if mesh_read_pattern.search(line):
             # Keep this line without extra indentation
             processed_lines.append("    solver.settings.file.read_mesh(file_name=mesh_path)\n")
@@ -116,12 +173,47 @@ def generate_master_fluent_script(input_file_path: str, project_folder_path: str
     cas_folder = os.path.join(project_folder_path, "test_files", "cas")
     os.makedirs(cas_folder, exist_ok=True)
 
+    # --- Handle saved design points ---
+    if save_design_points is None:
+        # Try to read from saved_design_points.csv file
+        saved_dp_file = os.path.join(project_folder_path, "test_files", "dps", "saved_design_points.csv")
+        if os.path.exists(saved_dp_file):
+            try:
+                import csv
+                with open(saved_dp_file, 'r') as f:
+                    reader = csv.reader(f)
+                    header = next(reader)  # Skip header
+                    save_design_points = []
+                    for row in reader:
+                        if row:  # Skip empty rows
+                            save_design_points.append(int(row[0]))
+                print(f"Loaded adjusted saved design points: {save_design_points}")
+            except Exception as e:
+                print(f"Error reading saved design points file: {e}")
+                save_design_points = None
+        else:
+            save_design_points = None
+    
     # --- Convert save_design_points to string for script ---
     save_points_str = str(save_design_points) if save_design_points else "None"
     
     # --- Build one unified script ---
-    unified_script = f"""import ansys.fluent.core as pyfluent
-import os, sys
+    # Get path to IMPORTANT FILES FOR AUTOMATION directory (where snapshot_functions.py is located)
+    # This assumes batch_solver.py is in the IMPORTANT FILES FOR AUTOMATION directory
+    automation_folder = os.path.dirname(os.path.abspath(__file__))
+    unified_script = f"""import os
+import sys
+
+# Add IMPORTANT FILES FOR AUTOMATION to path for snapshot_functions import
+# This allows the generated script to import snapshot_functions module
+automation_path = r"{automation_folder}"
+if automation_path not in sys.path:
+    sys.path.insert(0, automation_path)
+
+os.environ.setdefault("PYVISTA_OFF_SCREEN", "true")
+os.environ.setdefault("MPLBACKEND", "Agg")
+
+import ansys.fluent.core as pyfluent
 
 # Launch Fluent session
 solver = pyfluent.launch_fluent(
@@ -164,13 +256,13 @@ for idx, mesh_name in enumerate(mesh_files, start=1):
     print(f"[DONE] Output saved to: {{output_file}}")
     
     # --- Save case and data files for specified design points ---
-    if save_design_points is not None and idx in save_design_points:
+    if save_design_points is not None and (idx-1) in save_design_points:
         cas_folder = os.path.join(r"{project_folder_path}", "test_files", "cas")
         os.makedirs(cas_folder, exist_ok=True)
         
-        # Generate case and data file names based on design point
-        case_filename = f"design_point_{{idx}}_case.cas"
-        data_filename = f"design_point_{{idx}}_data.dat"
+        # Generate case and data file names based on design point (0-based)
+        case_filename = f"design_point_{{idx-1}}_case.cas"
+        data_filename = f"design_point_{{idx-1}}_data.dat"
         
         case_path = os.path.join(cas_folder, case_filename)
         data_path = os.path.join(cas_folder, data_filename)
@@ -181,7 +273,49 @@ for idx, mesh_name in enumerate(mesh_files, start=1):
         print(f"Saving data file: {{data_filename}}")
         solver.settings.file.write_data(file_name=data_path)
         
-        print(f"Case and data files saved for design point {{idx}}")
+        print(f"Case and data files saved for design point {{idx-1}}")
+    
+    # --- Generate snapshots if configured (independent of case/data file saving) ---
+    try:
+        from pathlib import Path
+        from snapshot_functions import load_snapshot_preferences, generate_snapshots_from_config
+        
+        project_folder = Path(r"{project_folder_path}")
+        snapshot_config_path = project_folder / "test_files" / "plots" / "snapshot_config.json"
+        
+        if snapshot_config_path.exists():
+            try:
+                preferences = load_snapshot_preferences(project_folder)
+                
+                # Check if this design point should have snapshots
+                if preferences.design_points is not None and (idx-1) in preferences.design_points:
+                    print(f"[INFO] Generating snapshots for design point {{idx-1}}")
+                    saved_images = generate_snapshots_from_config(
+                        solver=solver,
+                        preferences=preferences,
+                        design_point_index=(idx-1),
+                        output_dir=None  # Uses default: project_folder/test_files/plots
+                    )
+                    if saved_images:
+                        print(f"[SUCCESS] Generated {{len(saved_images)}} snapshot(s) for design point {{idx-1}}")
+                    else:
+                        print(f"[WARNING] No snapshots generated for design point {{idx-1}}")
+                else:
+                    print(f"[INFO] Design point {{idx-1}} not in snapshot config design_points list, skipping snapshots")
+            except Exception as snapshot_error:
+                print(f"[WARNING] Failed to generate snapshots for design point {{idx-1}}: {{snapshot_error}}")
+                import traceback
+                traceback.print_exc()
+        else:
+            print(f"[INFO] Snapshot config not found at {{snapshot_config_path}}, skipping snapshots")
+    except ImportError as import_error:
+        print(f"[WARNING] Could not import snapshot functions: {{import_error}}")
+    except Exception as snapshot_error:
+        print(f"[WARNING] Error checking snapshot config: {{snapshot_error}}")
+
+# --- Close Fluent session after all cases are processed ---
+solver.exit()
+print("\\n[INFO] All cases processed. Fluent session closed.")
 """
 
     # --- Save final unified Python file ---

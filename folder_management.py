@@ -49,7 +49,7 @@ def create_folders(project_root):
 
 def move_ref_file(source_file, project_folder):
     """
-    Move a file to the project's ref_files/scripts folder.
+    Move a file to the project's ref_files/ref folder.
 
     Parameters:
         source_file (str): Full path to the source file.
@@ -58,6 +58,19 @@ def move_ref_file(source_file, project_folder):
     Returns:
         str: Absolute path of the moved file.
     """
+    # Check if source file exists
+    if not os.path.exists(source_file):
+        print(f"⚠️ Source file not found: {source_file}")
+        # Try to find it in the expected destination
+        filename = os.path.basename(source_file)
+        relative_target = r"ref_files\ref"
+        target_folder = os.path.join(project_folder, relative_target)
+        destination_file = os.path.join(target_folder, filename)
+        if os.path.exists(destination_file):
+            print(f"✅ File already in correct location: {destination_file}")
+            return destination_file
+        else:
+            raise FileNotFoundError(f"Source file not found: {source_file}")
 
     # Define the relative target path
     relative_target = r"ref_files\ref"
@@ -71,6 +84,11 @@ def move_ref_file(source_file, project_folder):
     # Build the full destination path
     filename = os.path.basename(source_file)
     destination_file = os.path.join(target_folder, filename)
+    
+    # Check if file is already in the correct location
+    if os.path.abspath(source_file) == os.path.abspath(destination_file):
+        print(f"✅ File already in correct location: {destination_file}")
+        return destination_file
 
     # Move the file
     shutil.move(source_file, destination_file)
@@ -92,6 +110,19 @@ def move_script_file(source_file, project_folder):
     Returns:
         str: Absolute path of the moved file.
     """
+    # Check if source file exists
+    if not os.path.exists(source_file):
+        print(f"⚠️ Source file not found: {source_file}")
+        # Try to find it in the expected destination
+        filename = os.path.basename(source_file)
+        relative_target = r"ref_files\scripts"
+        target_folder = os.path.join(project_folder, relative_target)
+        destination_file = os.path.join(target_folder, filename)
+        if os.path.exists(destination_file):
+            print(f"✅ File already in correct location: {destination_file}")
+            return destination_file
+        else:
+            raise FileNotFoundError(f"Source file not found: {source_file}")
 
     # Define the relative target path
     relative_target = r"ref_files\scripts"
@@ -105,6 +136,11 @@ def move_script_file(source_file, project_folder):
     # Build the full destination path
     filename = os.path.basename(source_file)
     destination_file = os.path.join(target_folder, filename)
+    
+    # Check if file is already in the correct location
+    if os.path.abspath(source_file) == os.path.abspath(destination_file):
+        print(f"✅ File already in correct location: {destination_file}")
+        return destination_file
 
     # Move the file
     shutil.move(source_file, destination_file)
