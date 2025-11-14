@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import re
+import time
 
 def generate_individual_case_files(case_journal_template, project_folder, dimension, solver_cores, save_design_points=None):
     """
@@ -270,34 +271,30 @@ def main():
             snapshot_config_path = project_folder_path / "test_files" / "plots" / "snapshot_config.json"
             
             if snapshot_config_path.exists():
-                try:
-                    preferences = load_snapshot_preferences(project_folder_path)
-                    
-                    # Check if this design point should have snapshots
-                    if preferences.design_points is not None and {idx-1} in preferences.design_points:
-                        print(f"[INFO] Generating snapshots for design point {idx-1}")
-                        saved_images = generate_snapshots_from_config(
-                            solver=solver,
-                            preferences=preferences,
-                            design_point_index={idx-1},
-                            output_dir=None  # Uses default: project_folder/test_files/plots
-                        )
-                        if saved_images:
-                            print(f"[SUCCESS] Generated {{len(saved_images)}} snapshot(s) for design point {idx-1}")
-                        else:
-                            print(f"[WARNING] No snapshots generated for design point {idx-1}")
+                preferences = load_snapshot_preferences(project_folder_path)
+                
+                # Check if this design point should have snapshots
+                if preferences.design_points is not None and {idx-1} in preferences.design_points:
+                    print(f"[INFO] Generating snapshots for design point {idx-1}")
+                    saved_images = generate_snapshots_from_config(
+                        solver=solver,
+                        preferences=preferences,
+                        design_point_index={idx-1},
+                        output_dir=None  # Uses default: project_folder/test_files/plots
+                    )
+                    if saved_images:
+                        print(f"[SUCCESS] Generated {{len(saved_images)}} snapshot(s) for design point {idx-1}")
                     else:
-                        print(f"[INFO] Design point {idx-1} not in snapshot config design_points list, skipping snapshots")
-                except Exception as snapshot_error:
-                    print(f"[WARNING] Failed to generate snapshots for design point {idx-1}: {{snapshot_error}}")
-                    import traceback
-                    traceback.print_exc()
+                        print(f"[WARNING] No snapshots generated for design point {idx-1}")
+                else:
+                    print(f"[INFO] Design point {idx-1} not in snapshot config design_points list, skipping snapshots")
             else:
                 print(f"[INFO] Snapshot config not found at {{snapshot_config_path}}, skipping snapshots")
         except ImportError as import_error:
             print(f"[WARNING] Could not import snapshot functions: {{import_error}}")
         except Exception as snapshot_error:
             print(f"[WARNING] Error checking snapshot config: {{snapshot_error}}")
+            traceback.print_exc()
 
         return 0
     except Exception as exc:
@@ -424,36 +421,53 @@ def run_fluent_mesh_case(project_root, fluent_path, meshing_cores):
         
         # Step 1: Run mesh journal
         print(f"🌀 Running mesh journal: {mesh_journal_file}")
-        try:
-            subprocess.run([fluent_path,
-                          "3d",
-                          "-meshing",
-                          "-hidden",
-                          "-g",
-                          f"-t{meshing_cores}",
-                          "-i", mesh_journal_path])
-            print(f"✅ Mesh journal completed: {mesh_journal_file}")
-            
-            # Clean up .fmd files created by Fluent to save space
-            geoms_folder = os.path.join(project_root, "test_files", "geoms")
-            if os.path.exists(geoms_folder):
-                fmd_files = [f for f in os.listdir(geoms_folder) if f.lower().endswith('.fmd')]
-                for fmd_file in fmd_files:
-                    fmd_path = os.path.join(geoms_folder, fmd_file)
-                    try:
-                        os.remove(fmd_path)
-                        print(f"🗑️ Deleted .fmd file: {fmd_file}")
-                    except Exception as e:
-                        print(f"⚠️ Could not delete {fmd_file}: {e}")
-                        
-        except Exception as e:
-            print(f"❌ Error running mesh journal {mesh_journal_file}: {e}")
+        mesh_ready = False
+        for attempt in range(1, 4):
+            try:
+                mesh_process = subprocess.run(
+                    [
+                        fluent_path,
+                        "3d",
+                        "-meshing",
+                        "-hidden",
+                        "-g",
+                        f"-t{meshing_cores}",
+                        "-i",
+                        mesh_journal_path,
+                    ]
+                )
+                if mesh_process.returncode != 0:
+                    print(f"❌ Mesh journal failed with exit code {mesh_process.returncode}: {mesh_journal_file}")
+                elif not os.path.exists(mesh_path):
+                    print(f"❌ Mesh file was not generated: {mesh_path}")
+                else:
+                    mesh_ready = True
+                    print(f"✅ Mesh journal completed: {mesh_journal_file}")
+                    break
+            except Exception as e:
+                print(f"❌ Error running mesh journal {mesh_journal_file}: {e}")
+            if attempt < 3:
+                print("   Retrying mesh generation in 5 seconds...")
+                time.sleep(5)
+        if not mesh_ready:
             continue
+
+        # Clean up .fmd files created by Fluent to save space
+        geoms_folder = os.path.join(project_root, "test_files", "geoms")
+        if os.path.exists(geoms_folder):
+            fmd_files = [f for f in os.listdir(geoms_folder) if f.lower().endswith(".fmd")]
+            for fmd_file in fmd_files:
+                fmd_path = os.path.join(geoms_folder, fmd_file)
+                try:
+                    os.remove(fmd_path)
+                    print(f"🗑️ Deleted .fmd file: {fmd_file}")
+                except Exception as e:
+                    print(f"⚠️ Could not delete {fmd_file}: {e}")
         
         # Step 2: Run case file (similar to run_generated_fluent_script)
         print(f"▶ Running case file: {case_filename}")
         try:
-            result = subprocess.run([sys.executable, case_file_path], capture_output=True, text=True)
+            result = subprocess.run([sys.executable, case_file_path], capture_output=False, text=True)
             
             # Print the output of the script (like run_generated_fluent_script)
             if result.stdout:
