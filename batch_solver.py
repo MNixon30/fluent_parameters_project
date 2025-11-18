@@ -6,6 +6,7 @@ import sys
 def run_meshing_scripts(project_root, fluent_path, meshing_cores):
     """
     Runs all Fluent 2D/3D meshing journal scripts stored in <project_root>\test_files\scripts automatically.
+    Tracks mesh failures and creates a mapping file.
     
     Parameters:
         project_root (str): Root folder of the project.
@@ -13,6 +14,7 @@ def run_meshing_scripts(project_root, fluent_path, meshing_cores):
         meshing_cores (int): Number of cores for meshing.
     """
     script_folder = os.path.join(project_root, "test_files", "scripts")
+    mesh_folder = os.path.join(project_root, "test_files", "msh")
 
     if not os.path.exists(script_folder):
         print(f"⚠️ Folder not found: {script_folder}")
@@ -31,17 +33,58 @@ def run_meshing_scripts(project_root, fluent_path, meshing_cores):
 
     # Define the geoms folder for cleanup
     geoms_folder = os.path.join(project_root, "test_files", "geoms")
+    
+    # Track mesh failures
+    failed_mesh_info = {}  # {dp_idx: 'mesh'}
 
     for script in script_paths:
-        print(f"🌀 Running meshing script: {os.path.basename(script)}")
-        subprocess.run([fluent_exe,
-                        "3d",
-                        "-meshing",    # Explicit meshing mode
-                        "-hidden",
-                        "-g",     
-                        f"-t{meshing_cores}",         # Number of threads
-                        "-i", script]) # Input journal
-        print(f"✅ Finished: {os.path.basename(script)}")
+        script_name = os.path.basename(script)
+        print(f"🌀 Running meshing script: {script_name}")
+        
+        # Extract design point index from script filename
+        dp_match = re.search(r'_dp(\d+)_', script_name)
+        actual_dp_idx = None
+        if dp_match:
+            actual_dp_idx = int(dp_match.group(1))
+        
+        # Determine expected mesh filename
+        mesh_filename = script_name.rsplit('_mesh.jou', 1)[0] + '.msh.h5'
+        mesh_path = os.path.join(mesh_folder, mesh_filename)
+        
+        # Run meshing with retry logic
+        mesh_ready = False
+        for attempt in range(1, 4):
+            try:
+                mesh_process = subprocess.run(
+                    [fluent_exe,
+                     "3d",
+                     "-meshing",
+                     "-hidden",
+                     "-g",
+                     f"-t{meshing_cores}",
+                     "-i", script],
+                    capture_output=False
+                )
+                if mesh_process.returncode != 0:
+                    print(f"❌ Mesh journal failed with exit code {mesh_process.returncode}: {script_name}")
+                elif not os.path.exists(mesh_path):
+                    print(f"❌ Mesh file was not generated: {mesh_path}")
+                else:
+                    mesh_ready = True
+                    print(f"✅ Finished: {script_name}")
+                    break
+            except Exception as e:
+                print(f"❌ Error running mesh journal {script_name}: {e}")
+            if attempt < 3:
+                print("   Retrying mesh generation in 5 seconds...")
+                import time
+                time.sleep(5)
+        
+        if not mesh_ready:
+            # Track mesh failure
+            if actual_dp_idx is not None:
+                failed_mesh_info[actual_dp_idx] = 'mesh'
+            print(f"❌ Mesh generation failed after retries: {script_name}")
         
         # Clean up .fmd files created by Fluent to save space
         if os.path.exists(geoms_folder):
@@ -53,6 +96,33 @@ def run_meshing_scripts(project_root, fluent_path, meshing_cores):
                     print(f"🗑️ Deleted .fmd file: {fmd_file}")
                 except Exception as e:
                     print(f"⚠️ Could not delete {fmd_file}: {e}")
+    
+    # Save mesh failure information
+    if failed_mesh_info:
+        failed_mesh_file = os.path.join(project_root, "test_files", "dps", "failed_design_points.csv")
+        try:
+            import csv
+            # Read existing failures if file exists
+            existing_failures = {}
+            if os.path.exists(failed_mesh_file):
+                with open(failed_mesh_file, 'r', encoding='utf-8') as f:
+                    reader = csv.reader(f)
+                    next(reader)  # Skip header
+                    for row in reader:
+                        if row and len(row) >= 2:
+                            existing_failures[int(row[0])] = row[1]
+            
+            # Merge with mesh failures (mesh failures take precedence if both exist)
+            existing_failures.update(failed_mesh_info)
+            
+            with open(failed_mesh_file, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(['design_point_index', 'failure_type'])
+                for dp_idx in sorted(existing_failures.keys()):
+                    writer.writerow([dp_idx, existing_failures[dp_idx]])
+            print(f"📝 Saved mesh failure information to: {failed_mesh_file}")
+        except Exception as e:
+            print(f"⚠️ Could not save mesh failure information: {e}")
 
 
 
@@ -230,92 +300,169 @@ mesh_files = [f for f in os.listdir(mesh_folder) if f.lower().endswith(('.msh', 
 # --- Design points to save case/data files ---
 save_design_points = {save_points_str}
 
+# --- Create mapping of mesh files to design point indices ---
+import re
+mesh_to_dp = {{}}  # {{mesh_name: dp_idx}}
+for mesh_name in mesh_files:
+    dp_match = re.search(r'_dp(\d+)\.', mesh_name)
+    if dp_match:
+        mesh_to_dp[mesh_name] = int(dp_match.group(1))
+    else:
+        # Fallback: use index if pattern doesn't match
+        mesh_to_dp[mesh_name] = None
+
 # --- Loop through all meshes ---
+successful_dp_indices = []
+failed_dp_info = {{}}  # Track failures: {{dp_idx: 'case'}}
+
 for idx, mesh_name in enumerate(mesh_files, start=1):
     mesh_path = os.path.join(mesh_folder, mesh_name)
-    print(f"\\n=== Running case {{idx}} / {{len(mesh_files)}}: {{mesh_name}} ===")
+    actual_dp_idx = mesh_to_dp.get(mesh_name, idx - 1)  # Use actual DP index or fallback to loop index
+    dp_info = f" (Design Point {{actual_dp_idx}})" if actual_dp_idx is not None else ""
+    print(f"\\n=== Running case {{idx}} / {{len(mesh_files)}}: {{mesh_name}}{{dp_info}} ===")
+    
+    try:
 
 """
 
-    # Add processed lines (mesh read not double-indented)
-    unified_script += "".join(processed_lines)
+    # Add processed lines (indented inside try block)
+    # Each line needs to be indented by 8 spaces (inside try block inside for loop)
+    for line in processed_lines:
+        unified_script += "        " + line  # 8 spaces for try block inside for loop
 
     # Add the block that saves output parameters and case/data files
     unified_script += f"""
-    # --- Save output parameters for this case ---
-    output_folder = os.path.join(r"{project_folder_path}", "test_files", "out")
-    os.makedirs(output_folder, exist_ok=True)
-    output_file = os.path.join(output_folder, f"out_{{idx-1}}.txt")
+            # --- Save output parameters for this case ---
+            # Use actual design point index (not loop index) for output file naming
+            output_folder = os.path.join(r"{project_folder_path}", "test_files", "out")
+            os.makedirs(output_folder, exist_ok=True)
+            output_file = os.path.join(output_folder, f"out_{{actual_dp_idx}}.txt")
 
-    original_stdout = sys.stdout
-    with open(output_file, "w", encoding="utf-8") as f:
-        sys.stdout = f
-        solver.settings.parameters.output_parameters.print_all_to_console()
-        sys.stdout = original_stdout
+            original_stdout = sys.stdout
+            with open(output_file, "w", encoding="utf-8") as f:
+                sys.stdout = f
+                solver.settings.parameters.output_parameters.print_all_to_console()
+                sys.stdout = original_stdout
 
-    print(f"[DONE] Output saved to: {{output_file}}")
-    
-    # --- Save case and data files for specified design points ---
-    if save_design_points is not None and (idx-1) in save_design_points:
-        cas_folder = os.path.join(r"{project_folder_path}", "test_files", "cas")
-        os.makedirs(cas_folder, exist_ok=True)
-        
-        # Generate case and data file names based on design point (0-based)
-        case_filename = f"design_point_{{idx-1}}_case.cas"
-        data_filename = f"design_point_{{idx-1}}_data.dat"
-        
-        case_path = os.path.join(cas_folder, case_filename)
-        data_path = os.path.join(cas_folder, data_filename)
-        
-        print(f"Saving case file: {{case_filename}}")
-        solver.settings.file.write_case(file_name=case_path)
-        
-        print(f"Saving data file: {{data_filename}}")
-        solver.settings.file.write_data(file_name=data_path)
-        
-        print(f"Case and data files saved for design point {{idx-1}}")
-    
-    # --- Generate snapshots if configured (independent of case/data file saving) ---
-    try:
-        from pathlib import Path
-        from snapshot_functions import load_snapshot_preferences, generate_snapshots_from_config
-        
-        project_folder = Path(r"{project_folder_path}")
-        snapshot_config_path = project_folder / "test_files" / "plots" / "snapshot_config.json"
-        
-        if snapshot_config_path.exists():
-            try:
-                preferences = load_snapshot_preferences(project_folder)
+            print(f"[DONE] Output saved to: {{output_file}}")
+            
+            # Track successful design point
+            if actual_dp_idx is not None:
+                successful_dp_indices.append(actual_dp_idx)
+            
+            # --- Save case and data files for specified design points ---
+            if save_design_points is not None and actual_dp_idx is not None and actual_dp_idx in save_design_points:
+                cas_folder = os.path.join(r"{project_folder_path}", "test_files", "cas")
+                os.makedirs(cas_folder, exist_ok=True)
                 
-                # Check if this design point should have snapshots
-                if preferences.design_points is not None and (idx-1) in preferences.design_points:
-                    print(f"[INFO] Generating snapshots for design point {{idx-1}}")
-                    saved_images = generate_snapshots_from_config(
-                        solver=solver,
-                        preferences=preferences,
-                        design_point_index=(idx-1),
-                        output_dir=None  # Uses default: project_folder/test_files/plots
-                    )
-                    if saved_images:
-                        print(f"[SUCCESS] Generated {{len(saved_images)}} snapshot(s) for design point {{idx-1}}")
-                    else:
-                        print(f"[WARNING] No snapshots generated for design point {{idx-1}}")
+                # Generate case and data file names based on actual design point index
+                case_filename = f"design_point_{{actual_dp_idx}}_case.cas"
+                data_filename = f"design_point_{{actual_dp_idx}}_data.dat"
+                
+                case_path = os.path.join(cas_folder, case_filename)
+                data_path = os.path.join(cas_folder, data_filename)
+                
+                print(f"Saving case file: {{case_filename}}")
+                solver.settings.file.write_case(file_name=case_path)
+                
+                print(f"Saving data file: {{data_filename}}")
+                solver.settings.file.write_data(file_name=data_path)
+                
+                print(f"Case and data files saved for design point {{actual_dp_idx}}")
+            
+            # --- Generate snapshots if configured (independent of case/data file saving) ---
+            try:
+                from pathlib import Path
+                from snapshot_functions import load_snapshot_preferences, generate_snapshots_from_config
+                
+                project_folder = Path(r"{project_folder_path}")
+                snapshot_config_path = project_folder / "test_files" / "plots" / "snapshot_config.json"
+                
+                if snapshot_config_path.exists():
+                    try:
+                        preferences = load_snapshot_preferences(project_folder)
+                        
+                        # Check if this design point should have snapshots
+                        if preferences.design_points is not None and actual_dp_idx is not None and actual_dp_idx in preferences.design_points:
+                            print(f"[INFO] Generating snapshots for design point {{actual_dp_idx}}")
+                            saved_images = generate_snapshots_from_config(
+                                solver=solver,
+                                preferences=preferences,
+                                design_point_index=actual_dp_idx,
+                                output_dir=None  # Uses default: project_folder/test_files/plots
+                            )
+                            if saved_images:
+                                print(f"[SUCCESS] Generated {{len(saved_images)}} snapshot(s) for design point {{actual_dp_idx}}")
+                            else:
+                                print(f"[WARNING] No snapshots generated for design point {{actual_dp_idx}}")
+                        else:
+                            print(f"[INFO] Design point {{actual_dp_idx}} not in snapshot config design_points list, skipping snapshots")
+                    except Exception as snapshot_error:
+                        print(f"[WARNING] Failed to generate snapshots for design point {{actual_dp_idx}}: {{snapshot_error}}")
+                        import traceback
+                        traceback.print_exc()
                 else:
-                    print(f"[INFO] Design point {{idx-1}} not in snapshot config design_points list, skipping snapshots")
+                    print(f"[INFO] Snapshot config not found at {{snapshot_config_path}}, skipping snapshots")
+            except ImportError as import_error:
+                print(f"[WARNING] Could not import snapshot functions: {{import_error}}")
             except Exception as snapshot_error:
-                print(f"[WARNING] Failed to generate snapshots for design point {{idx-1}}: {{snapshot_error}}")
-                import traceback
-                traceback.print_exc()
-        else:
-            print(f"[INFO] Snapshot config not found at {{snapshot_config_path}}, skipping snapshots")
-    except ImportError as import_error:
-        print(f"[WARNING] Could not import snapshot functions: {{import_error}}")
-    except Exception as snapshot_error:
-        print(f"[WARNING] Error checking snapshot config: {{snapshot_error}}")
+                print(f"[WARNING] Error checking snapshot config: {{snapshot_error}}")
+        
+        except Exception as case_error:
+            print(f"❌ Case failed for {{mesh_name}}: {{case_error}}")
+            import traceback
+            traceback.print_exc()
+            # Track case failure
+            if actual_dp_idx is not None:
+                failed_dp_info[actual_dp_idx] = 'case'
+            continue
 
-# --- Close Fluent session after all cases are processed ---
-solver.exit()
-print("\\n[INFO] All cases processed. Fluent session closed.")
+    # --- Close Fluent session after all cases are processed ---
+    solver.exit()
+    print("\\n[INFO] All cases processed. Fluent session closed.")
+    
+    # --- Save tracking information ---
+    import csv
+    project_root = r"{project_folder_path}"
+    
+    # Save successful design points
+    if successful_dp_indices:
+        successful_file = os.path.join(project_root, "test_files", "dps", "successful_design_points.csv")
+        os.makedirs(os.path.dirname(successful_file), exist_ok=True)
+        with open(successful_file, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(['design_point_index'])
+            for dp_idx in sorted(successful_dp_indices):
+                writer.writerow([dp_idx])
+        print(f"\\n📝 Saved successful design points: {{sorted(successful_dp_indices)}}")
+    
+    # Save failed design points (merge with existing failures)
+    if failed_dp_info:
+        failed_file = os.path.join(project_root, "test_files", "dps", "failed_design_points.csv")
+        os.makedirs(os.path.dirname(failed_file), exist_ok=True)
+        
+        # Read existing failures if file exists
+        existing_failures = {{}}
+        if os.path.exists(failed_file):
+            try:
+                with open(failed_file, 'r', encoding='utf-8') as f:
+                    reader = csv.reader(f)
+                    next(reader)  # Skip header
+                    for row in reader:
+                        if row and len(row) >= 2:
+                            existing_failures[int(row[0])] = row[1]
+            except Exception:
+                pass
+        
+        # Merge with case failures (case failures take precedence if both exist)
+        existing_failures.update(failed_dp_info)
+        
+        with open(failed_file, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(['design_point_index', 'failure_type'])
+            for dp_idx in sorted(existing_failures.keys()):
+                writer.writerow([dp_idx, existing_failures[dp_idx]])
+        print(f"📝 Saved failed design points: {{sorted(failed_dp_info.keys())}}")
 """
 
     # --- Save final unified Python file ---

@@ -62,6 +62,21 @@ def perform_sensitivity_analysis(project_root, n_bootstrap=50, variance_threshol
     input_names = data['parameter_names']
     output_names = data['output_names']
     
+    # Validate data
+    if X.shape[0] == 0:
+        print("❌ Error: No samples found in data matrix.")
+        return {}
+    if X.shape[1] == 0:
+        print("❌ Error: No input parameters found.")
+        return {}
+    if Y.shape[1] == 0:
+        print("❌ Error: No output parameters found.")
+        return {}
+    if len(input_names) != X.shape[1]:
+        print(f"⚠️ Warning: Mismatch between input_names ({len(input_names)}) and X columns ({X.shape[1]})")
+    if len(output_names) != Y.shape[1]:
+        print(f"⚠️ Warning: Mismatch between output_names ({len(output_names)}) and Y columns ({Y.shape[1]})")
+    
     print(f"   📈 Data shape: {X.shape[0]} samples, {X.shape[1]} inputs, {Y.shape[1]} outputs")
     print(f"   🔧 Input parameters: {input_names}")
     print(f"   📊 Output parameters: {output_names}")
@@ -71,6 +86,10 @@ def perform_sensitivity_analysis(project_root, n_bootstrap=50, variance_threshol
     X_scaled = scaler_X.fit_transform(X)
     
     # Center outputs (important for PCA)
+    # Handle NaN values in output matrix
+    if np.any(np.isnan(Y)):
+        print("⚠️ Warning: NaN values detected in output matrix. Replacing with column means.")
+        Y = np.nan_to_num(Y, nan=np.nanmean(Y, axis=0))
     Y_centered = Y - np.mean(Y, axis=0)
     
     print("✅ Data preparation complete")
@@ -94,8 +113,14 @@ def perform_sensitivity_analysis(project_root, n_bootstrap=50, variance_threshol
     cumulative_variance = np.cumsum(explained_variance_ratio)
     
     # Choose number of components to retain
-    n_components = np.argmax(cumulative_variance >= variance_threshold) + 1
-    n_components = max(1, n_components)  # At least 1 component
+    # Find first component that reaches variance threshold
+    threshold_indices = np.where(cumulative_variance >= variance_threshold)[0]
+    if len(threshold_indices) > 0:
+        n_components = threshold_indices[0] + 1
+    else:
+        # If no component reaches threshold, use all components
+        n_components = len(explained_variance_ratio)
+    n_components = max(1, min(n_components, len(explained_variance_ratio)))  # At least 1, at most all components
     
     print(f"   📊 Total variance explained by {n_components} components: {cumulative_variance[n_components-1]:.3f}")
     print(f"   📈 Individual component variances: {explained_variance_ratio[:n_components]}")
@@ -223,12 +248,20 @@ def perform_sensitivity_analysis(project_root, n_bootstrap=50, variance_threshol
     std_importance = np.std(bootstrap_array, axis=0)
     
     # Map bootstrap results to the sorted parameter order
-    # Create a mapping from original parameter order to sorted order
+    # Note: results_df.index contains the original parameter indices (0, 1, 2, ...)
+    # which correspond to the original order in input_names. After sorting, these
+    # indices are preserved, so we can use them to index into mean_importance/std_importance
+    # which are also in the original parameter order.
     sorted_indices = results_df.index.tolist()
+    
+    # Verify we have the right number of parameters
+    if len(sorted_indices) != len(mean_importance):
+        raise ValueError(f"Mismatch: {len(sorted_indices)} parameters in results_df but {len(mean_importance)} in bootstrap results")
     
     # Update results with uncertainty (maintain sorted order)
     results_df['Mean_Importance'] = mean_importance[sorted_indices]
     results_df['Std_Importance'] = std_importance[sorted_indices]
+    # Add small epsilon to prevent division by zero
     results_df['Coefficient_of_Variation'] = std_importance[sorted_indices] / (mean_importance[sorted_indices] + 1e-10)
     
     print("✅ Bootstrap analysis complete")
@@ -964,8 +997,12 @@ def create_and_save_plot(results_df, input_names, output_names,
     ax1.set_title('Input Parameter Importance Ranking')
     ax1.invert_yaxis()
     
-    # Color bars by importance
-    colors = plt.cm.viridis(results_df['Mean_Importance'] / results_df['Mean_Importance'].max())
+    # Color bars by importance (handle division by zero)
+    max_importance = results_df['Mean_Importance'].max()
+    if max_importance > 0:
+        colors = plt.cm.viridis(results_df['Mean_Importance'] / max_importance)
+    else:
+        colors = plt.cm.viridis(np.zeros(len(results_df)))
     for bar, color in zip(bars, colors):
         bar.set_color(color)
     
@@ -1021,9 +1058,10 @@ def create_and_save_plot(results_df, input_names, output_names,
     ax3.set_title('PCA Explained Variance')
     ax3.legend()
     
-    # Add value labels on bars
+    # Add value labels on bars (only if values are positive)
     for i, (x, y) in enumerate(zip(x_positions, variance_values)):
-        ax3.text(x, y + 0.01, f'{y:.3f}', ha='center', va='bottom', fontsize=8)
+        if y > 0:
+            ax3.text(x, y + 0.01, f'{y:.3f}', ha='center', va='bottom', fontsize=8)
     
     # 4. Output correlation heatmap
     ax4 = axes[1, 1]

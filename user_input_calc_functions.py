@@ -4130,13 +4130,16 @@ def export_summary_to_text(project_folder):
                 f.write("Output Parameter Statistics:\n")
                 for param_name, values in output_results.items():
                     if values:
-                        valid_values = [v for v in values if v != 0.0]
+                        # Extract actual numeric values from dictionary, filtering out None/missing values
+                        # Note: Include 0.0 values as they are valid measurements
+                        valid_values = [v for v in values.values() if v is not None and isinstance(v, (int, float))]
                         if valid_values:
                             f.write(f"\n{param_name}:\n")
                             f.write(f"  Minimum: {min(valid_values):.6f}\n")
                             f.write(f"  Maximum: {max(valid_values):.6f}\n")
                             f.write(f"  Average: {sum(valid_values)/len(valid_values):.6f}\n")
                             f.write(f"  Range: {max(valid_values) - min(valid_values):.6f}\n")
+                            f.write(f"  Count: {len(valid_values)} design points\n")
             
             # Summary
             f.write("\n" + "="*100 + "\n")

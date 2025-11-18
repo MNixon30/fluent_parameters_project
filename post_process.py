@@ -8,6 +8,7 @@ def summarize_fluent_results(project_root: str, output_filename="summary2.csv"):
     Summarizes all numeric results from Fluent output files in
     <project_root>/test_files/out and writes a combined CSV file
     in <project_root>/test_files/out_final.
+    Also creates a summary of failed design points.
 
     Args:
         project_root (str): Root folder of the project.
@@ -62,6 +63,146 @@ def summarize_fluent_results(project_root: str, output_filename="summary2.csv"):
             writer.writerow(row)
 
     print(f"\n✅ Summary of all results saved to: {summary_path}")
+    
+    # Create summary of failed design points
+    _create_failed_design_points_summary(project_root, output_folder, all_results, sort_by_design_point)
+
+
+def _create_failed_design_points_summary(project_root: str, output_folder: str, all_results: dict, sort_by_design_point):
+    """
+    Create a summary of failed design points by comparing expected design points
+    (from DesignPoints.csv) with actual output files.
+    
+    Args:
+        project_root (str): Root folder of the project.
+        output_folder (str): Folder where summary files are saved.
+        all_results (dict): Dictionary of output files that were successfully processed.
+        sort_by_design_point: Function to extract design point index from filename.
+    """
+    # Get all expected design points from DesignPoints.csv
+    design_points_file = os.path.join(project_root, "test_files", "dps", "DesignPoints.csv")
+    expected_dp_indices = set()
+    dp_parameters = {}  # Store parameters for each design point
+    parameter_names = []  # Store parameter names from header
+    
+    if os.path.exists(design_points_file):
+        try:
+            with open(design_points_file, 'r', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                header = next(reader)  # Skip header
+                parameter_names = header
+                
+                for dp_idx, row in enumerate(reader):
+                    if row:  # Skip empty rows
+                        expected_dp_indices.add(dp_idx)
+                        # Store parameters for this design point
+                        dp_parameters[dp_idx] = {}
+                        for i, param_name in enumerate(parameter_names):
+                            if i < len(row):
+                                try:
+                                    dp_parameters[dp_idx][param_name] = float(row[i])
+                                except ValueError:
+                                    dp_parameters[dp_idx][param_name] = row[i] if row[i] else None
+        except Exception as e:
+            print(f"⚠️ Could not read DesignPoints.csv: {e}")
+            return
+    
+    # Get successful design points from mapping file (if it exists)
+    successful_dp_file = os.path.join(project_root, "test_files", "dps", "successful_design_points.csv")
+    successful_dp_indices = set()
+    if os.path.exists(successful_dp_file):
+        try:
+            with open(successful_dp_file, 'r', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                next(reader)  # Skip header
+                for row in reader:
+                    if row:
+                        successful_dp_indices.add(int(row[0]))
+        except Exception as e:
+            print(f"⚠️ Could not read successful_design_points.csv: {e}")
+    
+    # Get failure type information from failed_design_points.csv (if it exists)
+    failed_dp_file = os.path.join(project_root, "test_files", "dps", "failed_design_points.csv")
+    failure_types = {}  # {dp_idx: 'mesh' or 'case'}
+    if os.path.exists(failed_dp_file):
+        try:
+            with open(failed_dp_file, 'r', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                next(reader)  # Skip header
+                for row in reader:
+                    if row and len(row) >= 2:
+                        failure_types[int(row[0])] = row[1]  # dp_idx: failure_type
+        except Exception as e:
+            print(f"⚠️ Could not read failed_design_points.csv: {e}")
+    
+    # Find design points that have output files
+    actual_dp_indices = set()
+    for file_name in all_results.keys():
+        match = re.search(r'out_(\d+)\.txt', file_name)
+        if match:
+            actual_dp_indices.add(int(match.group(1)))
+    
+    # Determine failed design points
+    # If we have expected design points, use those. Otherwise, infer from successful mapping.
+    if expected_dp_indices:
+        # Failed = expected but not in actual outputs
+        failed_dp_indices = expected_dp_indices - actual_dp_indices
+    elif successful_dp_indices:
+        # If no DesignPoints.csv, we can't determine all expected, but we can report
+        # design points that were supposed to succeed but didn't
+        failed_dp_indices = successful_dp_indices - actual_dp_indices
+    else:
+        # No way to determine expected design points
+        print("⚠️ Cannot determine failed design points: DesignPoints.csv and successful_design_points.csv not found")
+        return
+    
+    if not failed_dp_indices:
+        print("\n✅ All design points completed successfully - no failed design points to report.")
+        return
+    
+    # Create failed design points summary
+    failed_summary_path = os.path.join(output_folder, "failed_design_points_summary.csv")
+    
+    with open(failed_summary_path, "w", newline="", encoding="utf-8") as csvfile:
+        writer = csv.writer(csvfile)
+        
+        # Header row - include failure type if available
+        if parameter_names and dp_parameters:
+            header = ["Design Point", "Failure Type"] + parameter_names
+        else:
+            header = ["Design Point", "Failure Type", "Status"]
+        writer.writerow(header)
+        
+        # Write failed design points
+        for dp_idx in sorted(failed_dp_indices):
+            # Get failure type if available
+            failure_type = failure_types.get(dp_idx, "unknown")
+            
+            if parameter_names and dp_idx in dp_parameters:
+                # Include parameter values and failure type
+                row = [dp_idx, failure_type]
+                for param_name in parameter_names:
+                    row.append(dp_parameters[dp_idx].get(param_name, "N/A"))
+                writer.writerow(row)
+            else:
+                # Just design point index and failure type
+                writer.writerow([dp_idx, failure_type, "Failed - no output file"])
+    
+    # Count failures by type
+    mesh_failures = [dp for dp in failed_dp_indices if failure_types.get(dp) == 'mesh']
+    case_failures = [dp for dp in failed_dp_indices if failure_types.get(dp) == 'case']
+    unknown_failures = [dp for dp in failed_dp_indices if failure_types.get(dp) not in ['mesh', 'case']]
+    
+    print(f"\n❌ Failed Design Points Summary:")
+    print(f"   Total failed: {len(failed_dp_indices)}")
+    print(f"   Failed design points: {sorted(failed_dp_indices)}")
+    if mesh_failures:
+        print(f"   Mesh failures: {sorted(mesh_failures)} ({len(mesh_failures)} design points)")
+    if case_failures:
+        print(f"   Case failures: {sorted(case_failures)} ({len(case_failures)} design points)")
+    if unknown_failures:
+        print(f"   Unknown failure type: {sorted(unknown_failures)} ({len(unknown_failures)} design points)")
+    print(f"   Summary saved to: {failed_summary_path}")
 
 
 def parse_design_points(project_root: str):
@@ -143,6 +284,28 @@ def parse_results_for_analysis(project_root: str, summary_filename="summary2.csv
         print("No design points found")
         return {}
     
+    # Load successful design points mapping if it exists
+    successful_dp_file = os.path.join(project_root, "test_files", "dps", "successful_design_points.csv")
+    successful_dp_indices = set()
+    if os.path.exists(successful_dp_file):
+        try:
+            with open(successful_dp_file, 'r', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                next(reader)  # Skip header
+                for row in reader:
+                    if row:
+                        successful_dp_indices.add(int(row[0]))
+            print(f"📊 Loaded {len(successful_dp_indices)} successful design points from mapping file")
+        except Exception as e:
+            print(f"⚠️ Could not read successful design points mapping: {e}")
+            print("   Will use all design points from DesignPoints.csv")
+    
+    # Filter design points to only include successful ones (if mapping exists)
+    if successful_dp_indices:
+        original_count = len(design_points_data)
+        design_points_data = [dp for dp in design_points_data if dp['design_point'] in successful_dp_indices]
+        print(f"📊 Filtered design points: {original_count} -> {len(design_points_data)} (removed failed design points)")
+    
     # Read summary file
     summary_path = os.path.join(project_root, "test_files", "out_final", summary_filename)
     
@@ -187,24 +350,57 @@ def parse_results_for_analysis(project_root: str, summary_filename="summary2.csv
         
         # Create data matrices for machine learning
         # Rows = Design points, Columns = Parameters/Outputs
+        # IMPORTANT: Each row in data_matrix and output_matrix corresponds to the SAME design point.
+        # The input parameters come from DesignPoints.csv, and outputs come from out_{design_point}.txt
+        # This ensures proper mapping between inputs and outputs even when some design points fail.
+        # 
+        # CRITICAL: We use dp_data['design_point'] (the ORIGINAL index from DesignPoints.csv),
+        # NOT the loop index. This ensures DP1 inputs map to DP1 outputs, DP2 inputs to DP2 outputs, etc.
+        # even if DP0 fails (which would make DP1 the first entry in the filtered list).
+        mapping_verification = []  # Track mapping for verification
         for dp_data in design_points_data:
+            dp_idx = dp_data['design_point']  # Original design point index (e.g., 0, 1, 2, 3)
+            
             # Input parameters row (one row per design point)
+            # These values come from DesignPoints.csv for this specific design point
             param_row = []
             for param_name in parameter_names:
                 param_row.append(dp_data['parameters'].get(param_name, 0.0))
             analysis_data['data_matrix'].append(param_row)
             
             # Output parameters row (one row per design point)
+            # These values come from out_{dp_idx}.txt, ensuring inputs and outputs are matched
+            # CRITICAL: We use dp_idx (original design point index), NOT the loop index
             output_row = []
+            output_file = f"out_{dp_idx}.txt"  # Use original design point index
+            output_found = False
+            
             for output_name in output_names:
-                # Find corresponding output file for this design point
-                output_file = f"out_{dp_data['design_point']}.txt"
                 if output_file in outputs[output_name]:
                     output_row.append(outputs[output_name][output_file])
+                    output_found = True
                 else:
-                    print(f"Missing output for design point {dp_data['design_point']}, output {output_name}, file {output_file}")
+                    # Missing output - this is expected for failed design points
+                    # Only warn if we don't have a mapping file (meaning we expect all to exist)
+                    if not successful_dp_indices:
+                        print(f"⚠️ Missing output for design point {dp_idx}, output {output_name}, file {output_file}")
                     output_row.append(None)
+            
+            # Verify mapping: inputs from DesignPoints.csv row dp_idx map to outputs from out_{dp_idx}.txt
+            mapping_verification.append({
+                'design_point': dp_idx,
+                'input_source': f"DesignPoints.csv row {dp_idx}",
+                'output_source': output_file,
+                'output_found': output_found
+            })
             analysis_data['output_matrix'].append(output_row)
+        
+        # Print mapping verification
+        if mapping_verification:
+            print(f"\n📋 Input-Output Mapping Verification:")
+            for mapping in mapping_verification:
+                status = "✅" if mapping['output_found'] else "⚠️"
+                print(f"   {status} DP{mapping['design_point']}: {mapping['input_source']} → {mapping['output_source']}")
         
         # Convert to numpy arrays for easier manipulation
         try:
