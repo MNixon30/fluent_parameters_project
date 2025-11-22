@@ -1147,6 +1147,74 @@ def summerize_refinment_results(project_folder):
             print(f"[WARNING] Failed to read {summary_path}: {exc}")
             continue
 
+        # Read failed design points if they exist
+        failed_dp_indices = set()
+        failed_dp_path = os.path.join(rif_path, "dps", "failed_design_points.csv")
+        if os.path.exists(failed_dp_path):
+            try:
+                failed_df = pd.read_csv(failed_dp_path)
+                if 'design_point_index' in failed_df.columns:
+                    failed_dp_indices = set(failed_df['design_point_index'].astype(int).tolist())
+                    if failed_dp_indices:
+                        print(f"[INFO] Found {len(failed_dp_indices)} failed design point(s) in {os.path.basename(rif_path)}: {sorted(failed_dp_indices)}")
+            except Exception as exc:
+                print(f"[WARNING] Failed to read failed_design_points.csv from {rif_path}: {exc}")
+
+        # If no failed points found in dps folder, check out_final folder
+        if not failed_dp_indices:
+            failed_dp_summary_path = os.path.join(rif_path, "out_final", "failed_design_points_summary.csv")
+            if os.path.exists(failed_dp_summary_path):
+                try:
+                    failed_summary_df = pd.read_csv(failed_dp_summary_path)
+                    # Try different possible column names
+                    dp_col = None
+                    for col in ['Design Point', 'design_point_index', 'design_point', 'Design Point Index']:
+                        if col in failed_summary_df.columns:
+                            dp_col = col
+                            break
+                    if dp_col:
+                        failed_dp_indices = set(failed_summary_df[dp_col].astype(int).tolist())
+                        if failed_dp_indices:
+                            print(f"[INFO] Found {len(failed_dp_indices)} failed design point(s) in {os.path.basename(rif_path)} (from summary): {sorted(failed_dp_indices)}")
+                except Exception as exc:
+                    print(f"[WARNING] Failed to read failed_design_points_summary.csv from {rif_path}: {exc}")
+
+        # Filter out failed design points from DesignPoints.csv and summary2.csv
+        if failed_dp_indices:
+            original_dp_count = len(dp_df)
+            original_col_count = summary_df.shape[1]
+            
+            # Filter DesignPoints.csv: rows are 0-indexed, so row index = design point index
+            successful_mask = ~pd.Series(range(len(dp_df))).isin(failed_dp_indices)
+            dp_df = dp_df[successful_mask].reset_index(drop=True)
+            
+            # Filter summary2.csv: columns are named like "out_0.txt", "out_1.txt", etc.
+            # Extract design point index from column names and filter
+            successful_columns = []
+            for col in summary_df.columns:
+                # Try to extract design point index from column name (e.g., "out_0.txt" -> 0)
+                if isinstance(col, str) and col.startswith("out_") and col.endswith(".txt"):
+                    try:
+                        dp_idx = int(col.replace("out_", "").replace(".txt", ""))
+                        if dp_idx not in failed_dp_indices:
+                            successful_columns.append(col)
+                    except ValueError:
+                        # If we can't parse the index, include the column (safe fallback)
+                        successful_columns.append(col)
+                else:
+                    # If column name doesn't match expected pattern (e.g., "Output Parameter"), include it
+                    successful_columns.append(col)
+            
+            summary_df = summary_df[successful_columns]
+            
+            filtered_dp_count = original_dp_count - len(dp_df)
+            filtered_col_count = original_col_count - summary_df.shape[1]
+            
+            if len(failed_dp_indices) > 0:
+                print(f"[INFO] Filtered {filtered_dp_count} failed design point(s) from DesignPoints.csv (keeping {len(dp_df)}/{original_dp_count})")
+                if filtered_col_count > 0:
+                    print(f"[INFO] Filtered {filtered_col_count} failed design point(s) from summary2.csv (keeping {summary_df.shape[1]}/{original_col_count} columns)")
+
         if combined_outputs is None:
             combined_outputs = pd.DataFrame(index=summary_df.index)
             output_index = summary_df.index
@@ -1171,8 +1239,23 @@ def summerize_refinment_results(project_folder):
                 f"[WARNING] Mismatch in {os.path.basename(rif_path)}:"
                 f" {len(dp_df)} design points vs {summary_df.shape[1]} output columns."
             )
-        combined_inputs.append(dp_df)
-        combined_outputs = pd.concat([combined_outputs, summary_df], axis=1)
+            print(f"[WARNING] This may indicate inconsistent filtering. Attempting to align by column count...")
+            # If there's a mismatch after filtering, align by minimum count
+            min_count = min(len(dp_df), summary_df.shape[1])
+            if min_count > 0:
+                dp_df = dp_df.head(min_count)
+                summary_df = summary_df.iloc[:, :min_count]
+                print(f"[INFO] Aligned to {min_count} design points/columns for {os.path.basename(rif_path)}")
+            else:
+                print(f"[WARNING] Skipping {os.path.basename(rif_path)} - no data after alignment.")
+                continue
+        
+        # Only append if we have successful design points
+        if len(dp_df) > 0 and summary_df.shape[1] > 0:
+            combined_inputs.append(dp_df)
+            combined_outputs = pd.concat([combined_outputs, summary_df], axis=1)
+        else:
+            print(f"[WARNING] Skipping {os.path.basename(rif_path)} - no successful design points after filtering.")
 
     if not combined_inputs or combined_outputs is None:
         print("[WARNING] No refinement data found to summarize.")

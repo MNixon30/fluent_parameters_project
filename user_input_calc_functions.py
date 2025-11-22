@@ -591,15 +591,63 @@ def delete_saved_design_points_csv(project_folder):
         print("ℹ️ No saved design points file found to delete.")
 
 
-def main_menu():
+def workflow_selection_menu():
+    """
+    Workflow selection menu - appears before main menu.
+    Allows user to select the type of workflow to run.
+    Currently supports: Full Geometry to Solve and Geometry Solver workflows.
+    Designed to allow future workflow expansions.
+    
+    Returns:
+        str: Selected workflow type identifier
+    """
+    print("\n" + "="*60)
+    print("WORKFLOW SELECTION")
+    print("="*60)
+    print("Select the workflow type:")
+    print("="*60)
+    print("1. Full Geometry to Solve")
+    print("   - Complete workflow from geometry to solution")
+    print("   - Includes: Setup, Geometry Modifications, Meshing, Case Generation, Solving, Analysis")
+    print("")
+    print("2. Geometry Solver")
+    print("   - Simplified workflow skipping geometry modifications")
+    print("   - Includes: Setup, Mesh Script Generation, Case Solving (batch/sequential)")
+    print("   - No parameter modifications or post-processing")
+    print("="*60)
+    
+    while True:
+        choice = input("\nEnter your choice (1 or 2): ").strip()
+        
+        if choice == "1":
+            workflow_type = "full_geometry_to_solve"
+            print(f"\n✅ Selected workflow: Full Geometry to Solve")
+            return workflow_type
+        elif choice == "2":
+            workflow_type = "geometry_solver"
+            print(f"\n✅ Selected workflow: Geometry Solver")
+            # Import and launch geometry solver
+            from geom_solver import geom_solver_main_menu
+            geom_solver_main_menu()
+            return workflow_type  # This won't be reached if user exits, but included for consistency
+        else:
+            print("❌ Invalid choice. Please enter 1 or 2.")
+
+
+def main_menu(workflow_type="full_geometry_to_solve"):
     """
     Main menu system for the CFD automation program.
+    
+    Args:
+        workflow_type (str): Type of workflow selected (default: "full_geometry_to_solve")
     """
     print("\n" + "="*60)
     print("CFD AUTOMATION PROGRAM")
     print("="*60)
     print("Welcome to the CFD automation system!")
     print("This program will help you automate your CFD workflow.")
+    if workflow_type == "full_geometry_to_solve":
+        print("Current workflow: Full Geometry to Solve")
     print("="*60)
     
     while True:
